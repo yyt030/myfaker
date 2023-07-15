@@ -70,6 +70,7 @@ type IndexField struct {
 	NonUnique    bool
 	Visible      string         // MySQL 8.0+
 	Expression   sql.NullString // MySQL 8.0.16+
+	Ignored      string         // 10.11.4-MariaDB
 }
 
 // Constraint holds Foreign Keys information
@@ -101,7 +102,7 @@ type Field struct {
 	ColumnType             string
 	ColumnKey              string
 	Extra                  string
-	Privileges             string
+	Privileges             sql.NullString // ob 3.2.3 is NULL
 	ColumnComment          string
 	GenerationExpression   string
 	SetEnumVals            []string
@@ -273,6 +274,9 @@ func getIndexes(db *sql.DB, schema, tableName string) (map[string]Index, error) 
 		cols, err := rows.Columns()
 		if err == nil && len(cols) >= 14 && cols[13] == "Visible" {
 			fields = append(fields, &i.Visible)
+		}
+		if err == nil && len(cols) >= 14 && cols[13] == "Ignored" {
+			fields = append(fields, &i.Ignored)
 		}
 		if err == nil && len(cols) >= 15 && cols[14] == "Expression" {
 			fields = append(fields, &i.Expression)

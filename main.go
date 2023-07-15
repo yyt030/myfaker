@@ -11,15 +11,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Percona-Lab/mysql_random_data_load/internal/getters"
-	"github.com/Percona-Lab/mysql_random_data_load/tableparser"
 	"github.com/go-ini/ini"
 	"github.com/go-sql-driver/mysql"
 	"github.com/gosuri/uiprogress"
 	"github.com/kr/pretty"
+	"github.com/yyt030/myfaker/internal/getters"
+	"github.com/yyt030/myfaker/tableparser"
 
 	log "github.com/sirupsen/logrus"
-	kingpin "gopkg.in/alecthomas/kingpin.v2"
+	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 type cliOptions struct {
@@ -59,7 +59,7 @@ var (
 
 	validFunctions = []string{"int", "string", "date", "date_in_range"}
 	maxValues      = map[string]int64{
-		"tinyint":   0XF,
+		"tinyint":   0xF,
 		"smallint":  0xFF,
 		"mediumint": 0x7FFFF,
 		"int":       0x7FFFFFFF,
@@ -88,11 +88,10 @@ type insertFunction func(*sql.DB, string, chan int, chan bool, *sync.WaitGroup)
 const (
 	defaultMySQLConfigSection = "client"
 	defaultConfigFile         = "~/.my.cnf"
-	defaultBulkSize           = 1000
+	defaultBulkSize           = 100
 )
 
 func main() {
-
 	opts, err := processCliParams()
 	if err != nil {
 		log.Fatal(err.Error())
@@ -116,14 +115,20 @@ func main() {
 		address = fmt.Sprintf("%s:%d", address, *opts.Port)
 	}
 
+	userName := *opts.User
+	userName = strings.SplitN(userName, ":", 2)[0]
+
 	dsn := mysql.Config{
-		User:                 *opts.User,
+		User:                 userName,
 		Passwd:               *opts.Pass,
 		Addr:                 address,
 		Net:                  net,
 		DBName:               "",
 		ParseTime:            true,
 		AllowNativePasswords: true,
+		Timeout:              time.Second * 5,
+		ReadTimeout:          time.Second * 60,
+		WriteTimeout:         time.Second * 60,
 	}
 
 	db, err := sql.Open("mysql", dsn.FormatDSN())
@@ -131,6 +136,10 @@ func main() {
 		panic(err)
 	}
 	db.SetMaxOpenConns(100)
+
+	if err := db.Ping(); err != nil {
+		panic(err)
+	}
 
 	// SET TimeZone to UTC to avoid errors due to random dates & daylight saving valid values
 	if _, err = db.Exec(`SET @@session.time_zone = "+00:00"`); err != nil {
@@ -347,7 +356,6 @@ func countRowsOK(count int, bar *uiprogress.Bar) chan int {
 // rowsChan <- [ v1-1, v1-2, v1-3, v2-1, v2-2, v2-3 ]
 // rowsChan <- [ v3-1, v3-2, v3-3, v4-1, v4-2, v4-3 ]
 // rowsChan <- [ v1-5, v5-2, v5-3, v6-1, v6-2, v6-3 ]
-//
 func generateInsertData(count int, values insertValues, rowsChan chan []getter) {
 	for i := 0; i < count; i++ {
 		insertRow := make([]getter, 0, len(values))
@@ -562,6 +570,7 @@ func isSupportedType(fieldType string) bool {
 	return ok
 }
 
+// 处理命令行参数
 func processCliParams() (*cliOptions, error) {
 	app := kingpin.New("mysql_random_data_loader", "MySQL Random Data Loader")
 

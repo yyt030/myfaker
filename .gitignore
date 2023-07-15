@@ -1,4 +1,4 @@
 random_data_load*
-vendor/
 bin/*
 dist/*
+.idea/

@@ -2,15 +2,24 @@ package main
 
 import (
 	"fmt"
+	"github.com/icrowley/fake"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/Percona-Lab/mysql_random_data_load/internal/getters"
-	"github.com/Percona-Lab/mysql_random_data_load/tableparser"
-	tu "github.com/Percona-Lab/mysql_random_data_load/testutils"
+	"github.com/yyt030/myfaker/internal/getters"
+	"github.com/yyt030/myfaker/tableparser"
+	tu "github.com/yyt030/myfaker/testutils"
 )
+
+func TestZHStr(t *testing.T) {
+	fake.SetLang("zh")
+	for i := 0; i < 10; i++ {
+		t.Logf("%s", fake.FullName())
+	}
+}
 
 func TestGetSamples(t *testing.T) {
 	conn := tu.GetMySQLConnection(t)
@@ -78,4 +87,21 @@ func TestGenerateInsertStmt(t *testing.T) {
 
 	query := generateInsertStmt(table)
 	tu.Equals(t, want, query)
+}
+
+func TestCNStr(t *testing.T) {
+	err := fake.SetLang("zh")
+	if err != nil {
+		panic(err)
+	}
+
+	t.Logf(">>>%s", fake.Sentence())
+}
+
+func TestSplitUser(t *testing.T) {
+	users := []string{"u@t#g:gi", "u@t#g:gi1:gi2", "u@t#g"}
+	for _, v := range users {
+		ss := strings.SplitN(v, ":", 2)
+		t.Logf("%s=>%s", v, ss[0])
+	}
 }
