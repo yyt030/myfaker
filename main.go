@@ -2,7 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"github.com/go-ini/ini"
+	"github.com/kr/pretty"
 	"net/url"
 	"os"
 	"os/user"
@@ -11,10 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-ini/ini"
 	"github.com/go-sql-driver/mysql"
 	"github.com/gosuri/uiprogress"
-	"github.com/kr/pretty"
 	"github.com/yyt030/myfaker/internal/getters"
 	"github.com/yyt030/myfaker/tableparser"
 
@@ -23,7 +24,7 @@ import (
 )
 
 type cliOptions struct {
-	app *kingpin.Application
+	//app *kingpin.Application
 
 	// Arguments
 	Schema    *string
@@ -55,10 +56,10 @@ type mysqlOptions struct {
 }
 
 var (
-	opts *cliOptions
+	//opts *cliOptions
 
-	validFunctions = []string{"int", "string", "date", "date_in_range"}
-	maxValues      = map[string]int64{
+	//validFunctions = []string{"int", "string", "date", "date_in_range"}
+	maxValues = map[string]int64{
 		"tinyint":   0xF,
 		"smallint":  0xFF,
 		"mediumint": 0x7FFFF,
@@ -70,20 +71,22 @@ var (
 		"bigint":    0x7FFFFFFFFFFFFFFF,
 	}
 
-	Version   = "0.0.0."
+	Version   = "v1.0.0"
 	Commit    = "<sha1>"
 	Branch    = "branch-name"
-	Build     = "2017-01-01"
+	Build     = "2023-07-16"
 	GoVersion = "1.9.2"
 )
 
-type getter interface {
-	Value() interface{}
-	Quote() string
-	String() string
-}
-type insertValues []getter
-type insertFunction func(*sql.DB, string, chan int, chan bool, *sync.WaitGroup)
+type (
+	getter interface {
+		Value() interface{}
+		Quote() string
+		String() string
+	}
+	insertValues   []getter
+	insertFunction func(*sql.DB, string, chan int, chan bool, *sync.WaitGroup)
+)
 
 const (
 	defaultMySQLConfigSection = "client"
@@ -92,73 +95,36 @@ const (
 )
 
 func main() {
+	log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
+
 	opts, err := processCliParams()
 	if err != nil {
-		log.Fatal(err.Error())
+		log.Errorf("process cli params failed:%v", err)
+		os.Exit(1)
 	}
 
-	if *opts.Version {
-		fmt.Printf("Version   : %s\n", Version)
-		fmt.Printf("Commit    : %s\n", Commit)
-		fmt.Printf("Branch    : %s\n", Branch)
-		fmt.Printf("Build     : %s\n", Build)
-		fmt.Printf("Go version: %s\n", GoVersion)
-		return
+	if *opts.Debug {
+		log.SetLevel(log.DebugLevel)
+		*opts.NoProgress = true
 	}
 
-	address := *opts.Host
-	net := "unix"
-	if address != "localhost" {
-		net = "tcp"
-	}
-	if *opts.Port != 0 {
-		address = fmt.Sprintf("%s:%d", address, *opts.Port)
-	}
-
-	userName := *opts.User
-	userName = strings.SplitN(userName, ":", 2)[0]
-
-	dsn := mysql.Config{
-		User:                 userName,
-		Passwd:               *opts.Pass,
-		Addr:                 address,
-		Net:                  net,
-		DBName:               "",
-		ParseTime:            true,
-		AllowNativePasswords: true,
-		Timeout:              time.Second * 5,
-		ReadTimeout:          time.Second * 60,
-		WriteTimeout:         time.Second * 60,
-	}
-
-	db, err := sql.Open("mysql", dsn.FormatDSN())
+	db, err := NewDB(opts)
 	if err != nil {
-		panic(err)
+		log.Errorf("create db failed:%v", err)
+		os.Exit(1)
 	}
-	db.SetMaxOpenConns(100)
-
-	if err := db.Ping(); err != nil {
-		panic(err)
-	}
+	defer db.Close()
 
 	// SET TimeZone to UTC to avoid errors due to random dates & daylight saving valid values
 	if _, err = db.Exec(`SET @@session.time_zone = "+00:00"`); err != nil {
-		log.Printf("Cannot set time zone to UTC: %s\n", err)
-		db.Close()
+		log.Errorf("Cannot set time zone to UTC: %s\n", err)
 		os.Exit(1)
 	}
 
 	table, err := tableparser.NewTable(db, *opts.Schema, *opts.TableName)
 	if err != nil {
-		log.Printf("cannot get table %s struct: %s", *opts.TableName, err)
-		db.Close()
+		log.Errorf("cannot get table %s struct: %s", *opts.TableName, err)
 		os.Exit(1)
-	}
-
-	log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
-	if *opts.Debug {
-		log.SetLevel(log.DebugLevel)
-		*opts.NoProgress = true
 	}
 	log.Debug(pretty.Sprint(table))
 
@@ -168,27 +134,6 @@ func main() {
 			log.Warnf("Trigger %q, %s %s", t.Trigger, t.Timing, t.Event)
 			log.Warnf("Statement: %s", t.Statement)
 		}
-	}
-
-	if *opts.Rows < 1 {
-		db.Close() // golint:noerror
-		log.Warnf("Number of rows < 1. There is nothing to do. Exiting")
-		os.Exit(1)
-	}
-
-	if *opts.BulkSize > *opts.Rows {
-		*opts.BulkSize = *opts.Rows
-	}
-	if *opts.BulkSize < 1 {
-		*opts.BulkSize = defaultBulkSize
-	}
-
-	if opts.MaxThreads == nil {
-		*opts.MaxThreads = runtime.NumCPU() * 10
-	}
-
-	if *opts.MaxThreads < 1 {
-		*opts.MaxThreads = 1
 	}
 
 	if !*opts.Print {
@@ -261,7 +206,47 @@ func main() {
 	if !*opts.Print {
 		log.Printf("%d rows inserted", totalOkCount)
 	}
-	db.Close()
+}
+
+func NewDB(opts *cliOptions) (*sql.DB, error) {
+	address := *opts.Host
+	net := "unix"
+	if address != "localhost" {
+		net = "tcp"
+	}
+	if *opts.Port != 0 {
+		address = fmt.Sprintf("%s:%d", address, *opts.Port)
+	}
+
+	// trim userName with :
+	userName := *opts.User
+	userName = strings.SplitN(userName, ":", 2)[0]
+
+	dsn := mysql.Config{
+		User:                 userName,
+		Passwd:               *opts.Pass,
+		Addr:                 address,
+		Net:                  net,
+		DBName:               "",
+		ParseTime:            true,
+		AllowNativePasswords: true,
+		Timeout:              time.Second * 5,
+		ReadTimeout:          time.Second * 60,
+		WriteTimeout:         time.Second * 60,
+	}
+
+	db, err := sql.Open("mysql", dsn.FormatDSN())
+	if err != nil {
+		return nil, err
+	}
+
+	if err := db.Ping(); err != nil {
+		return nil, err
+	}
+
+	db.SetMaxOpenConns(100)
+
+	return db, nil
 }
 
 func run(db *sql.DB, table *tableparser.Table, bar *uiprogress.Bar, sem chan bool,
@@ -486,9 +471,9 @@ func getSamples(conn *sql.DB, schema, table, field string, samples int64, dataTy
 	if err != nil {
 		return nil, fmt.Errorf("cannot get samples: %s, %s", query, err)
 	}
-	defer rows.Close()
+	defer rows.Close() // golint:noerror
 
-	values := []interface{}{}
+	var values []interface{}
 
 	for rows.Next() {
 		var err error
@@ -572,37 +557,83 @@ func isSupportedType(fieldType string) bool {
 
 // 处理命令行参数
 func processCliParams() (*cliOptions, error) {
-	app := kingpin.New("mysql_random_data_loader", "MySQL Random Data Loader")
+	opts := &cliOptions{}
+	app := kingpin.New("faker", "Faker Data For Mysql/Oceanbase(mysql mode)/IBM DB2")
+	versionCmd := app.Command("version", "print version info.")
+	genCmd := app.Command("mysql", "generate random data for mysql")
 
-	opts := &cliOptions{
-		app:        app,
-		BulkSize:   app.Flag("bulk-size", "Number of rows per insert statement").Default(fmt.Sprintf("%d", defaultBulkSize)).Int(),
-		ConfigFile: app.Flag("config-file", "MySQL config file").Default(expandHomeDir(defaultConfigFile)).String(),
-		Debug:      app.Flag("debug", "Log debugging information").Bool(),
-		Factor:     app.Flag("fk-samples-factor", "Percentage used to get random samples for foreign keys fields").Default("0.3").Float64(),
-		Host:       app.Flag("host", "Host name/IP").Short('h').String(),
-		MaxRetries: app.Flag("max-retries", "Number of rows to insert").Default("100").Int(),
-		MaxThreads: app.Flag("max-threads", "Maximum number of threads to run inserts").Default("1").Int(),
-		NoProgress: app.Flag("no-progress", "Show progress bar").Default("false").Bool(),
-		Pass:       app.Flag("password", "Password").Short('p').String(),
-		Port:       app.Flag("port", "Port").Short('P').Int(),
-		Print:      app.Flag("print", "Print queries to the standard output instead of inserting them into the db").Bool(),
-		Samples:    app.Flag("max-fk-samples", "Maximum number of samples for foreign keys fields").Default("100").Int64(),
-		User:       app.Flag("user", "User").Short('u').String(),
-		Version:    app.Flag("version", "Show version and exit").Bool(),
+	versionCmd.Action(func(ctx *kingpin.ParseContext) error {
+		fmt.Printf("Version   : %s\n", Version)
+		fmt.Printf("Commit    : %s\n", Commit)
+		fmt.Printf("Branch    : %s\n", Branch)
+		fmt.Printf("Build     : %s\n", Build)
+		fmt.Printf("Go version: %s\n", GoVersion)
+		return nil
+	})
 
-		Schema:    app.Arg("database", "Database").Required().String(),
-		TableName: app.Arg("table", "Table").Required().String(),
-		Rows:      app.Arg("rows", "Number of rows to insert").Required().Int(),
+	genCmd.Action(func(ctx *kingpin.ParseContext) error {
+		if mysqlOpts, err := readMySQLConfigFile(*opts.ConfigFile); err == nil {
+			checkMySQLParams(opts, mysqlOpts)
+		}
+
+		if len(*opts.Schema) == 0 {
+			dbTab := strings.Split(*opts.TableName, ".")
+			if len(dbTab) == 1 {
+				return errors.New("must input Database or Schema.TableName")
+			}
+			if len(dbTab) != 2 {
+				return fmt.Errorf("tableName format failed:%s", *opts.TableName)
+			}
+			*opts.Schema = dbTab[0]
+			*opts.TableName = dbTab[1]
+		}
+
+		if *opts.Rows < 1 {
+			return fmt.Errorf("number of rows < 1. There is nothing to do. Exiting")
+		}
+
+		if *opts.BulkSize > *opts.Rows {
+			*opts.BulkSize = *opts.Rows
+		}
+		if *opts.BulkSize < 1 {
+			*opts.BulkSize = defaultBulkSize
+		}
+
+		if opts.MaxThreads == nil {
+			*opts.MaxThreads = runtime.NumCPU() * 10
+		}
+
+		if *opts.MaxThreads < 1 {
+			*opts.MaxThreads = 1
+		}
+
+		return nil
+	})
+
+	opts = &cliOptions{
+		BulkSize:   genCmd.Flag("bulk-size", "Number of rows per insert statement").Default(fmt.Sprintf("%d", defaultBulkSize)).Int(),
+		ConfigFile: genCmd.Flag("config-file", "MySQL config file").Default(expandHomeDir(defaultConfigFile)).String(),
+		Debug:      genCmd.Flag("debug", "Log debugging information").Bool(),
+		Factor:     genCmd.Flag("fk-samples-factor", "Percentage used to get random samples for foreign keys fields").Default("0.3").Float64(),
+		MaxRetries: genCmd.Flag("max-retries", "Number of rows to insert").Default("100").Int(),
+		MaxThreads: genCmd.Flag("max-threads", "Maximum number of threads to run inserts").Default("1").Int(),
+		NoProgress: genCmd.Flag("no-progress", "Show progress bar").Default("false").Bool(),
+		Print:      genCmd.Flag("print", "Print queries to the standard output instead of inserting them into the db").Bool(),
+		Samples:    genCmd.Flag("max-fk-samples", "Maximum number of samples for foreign keys fields").Default("100").Int64(),
+
+		Host:      genCmd.Flag("host", "Host name/IP").Short('h').Required().String(),
+		Port:      genCmd.Flag("port", "Port").Short('P').Required().Int(),
+		User:      genCmd.Flag("user", "User").Short('u').Required().String(),
+		Pass:      genCmd.Flag("password", "Password").Short('p').Required().String(),
+		Schema:    genCmd.Flag("database", "Database").Short('D').String(),
+		TableName: genCmd.Flag("table", "Table").Short('t').String(),
+		Rows:      genCmd.Flag("rows", "Number of rows to insert").Default("1").Int(),
+		//Version:   app.Flag("version", "Show version and exit").Bool(),
 	}
-	_, err := app.Parse(os.Args[1:])
 
-	if err != nil {
-		return nil, err
-	}
-
-	if mysqlOpts, err := readMySQLConfigFile(*opts.ConfigFile); err == nil {
-		checkMySQLParams(opts, mysqlOpts)
+	if _, err := app.Parse(os.Args[1:]); err != nil {
+		log.Errorln(err)
+		os.Exit(1)
 	}
 
 	return opts, nil
